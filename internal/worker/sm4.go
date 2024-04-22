@@ -21,10 +21,10 @@ func Sm4Encrypt(key, iv, plainText []byte) ([]byte, error) {
 	return cryted, nil
 }
 
-func Sm4Decrypt(c *Chains) ([]byte, error) {
-	key := []byte(c.cf.Wallet.Key)
-	iv := []byte(c.cf.Wallet.Iv)
-	private_encode := c.cf.Wallet.PrivateEncode
+func Sm4Decrypt(c *Chains, chainId int) ([]byte, error) {
+	key := []byte(c.cf.Wallets[chainId].Key)
+	iv := []byte(c.cf.Wallets[chainId].Iv)
+	private_encode := c.cf.Wallets[chainId].PrivateEncode
 	cipherText, err := hex.DecodeString(private_encode)
 	block, err := sm4.NewCipher(key)
 	if err != nil {

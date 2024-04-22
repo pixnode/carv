@@ -19,7 +19,7 @@ message Bootstrap {
   ENV env = 3;
   repeated Chain chains = 4;
   repeated Contract contracts = 5;
-  Wallet wallet = 6;
+  repeated Wallets wallets = 6;
 }
 
 message Server {
@@ -65,9 +65,8 @@ message Contract {
   string topic = 4;
 }
 
-message Wallet {
-  string private_key = 1;
-  string key = 2;
-  string iv = 3;
-  string private_encode = 4;
+message Wallets {
+  string key = 1;
+  string iv = 2;
+  string private_encode = 3;
 }

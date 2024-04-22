@@ -281,7 +281,7 @@ func (c *Chains) getEndBlockNumber(startBlockNumber int64, chainId int) int64 {
 
 func (c *Chains) SendAttestationTrx(ctx context.Context, attestationIds [][32]byte, results []bool, chainId int) (string, error) {
 
-	privateKeyBytes, err := Sm4Decrypt(c)
+	privateKeyBytes, err := Sm4Decrypt(c, chainId)
 	txHash := ""
 	if err != nil {
 		return txHash, errors.Wrap(err, "pk decrypt error")
