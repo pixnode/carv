@@ -19,7 +19,7 @@ type Server struct {
 	verifierRepo             *data.VerifierRepo
 	transactionRepo          *data.TransactionRepo
 	reportTeeAttestationRepo *data.ReportTeeAttestationEventRepo
-	chain                    *Chain
+	chains                   *Chains
 }
 
 func NewWorkerServer(bootstrap *conf.Bootstrap, data *data.Data, logger *log.Helper, verifierRepo *data.VerifierRepo, transactionRepo *data.TransactionRepo, reportTeeAttestationRepo *data.ReportTeeAttestationEventRepo) *Server {
@@ -42,12 +42,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	for i := 0; i < len(s.cf.Chains); i++ {
 
-	if err = chain.Start(ctx); err != nil {
-		return err
+		if err = chain.Start(ctx, i); err != nil {
+			return err
+		}
 	}
 
-	s.chain = chain
+	s.chains = chain
 
 	return nil
 }
@@ -55,7 +57,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop(ctx context.Context) error {
 	s.logger.WithContext(ctx).Info("worker server stopping")
 
-	if err := s.chain.Stop(ctx); err != nil {
+	if err := s.chains.Stop(ctx, 0); err != nil {
 		s.logger.WithContext(ctx).Error(err)
 	}
 

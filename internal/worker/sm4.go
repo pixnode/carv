@@ -21,7 +21,7 @@ func Sm4Encrypt(key, iv, plainText []byte) ([]byte, error) {
 	return cryted, nil
 }
 
-func Sm4Decrypt(c *Chain) ([]byte, error) {
+func Sm4Decrypt(c *Chains) ([]byte, error) {
 	key := []byte(c.cf.Wallet.Key)
 	iv := []byte(c.cf.Wallet.Iv)
 	private_encode := c.cf.Wallet.PrivateEncode

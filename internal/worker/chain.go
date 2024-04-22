@@ -28,231 +28,250 @@ const (
 	defaultBlockNumberChanLength = 10
 )
 
-type Chain struct {
+type Chains struct {
 	cf                            *conf.Bootstrap
 	data                          *data.Data
 	logger                        *log.Helper
 	verifierRepo                  *data.VerifierRepo
 	transactionRepo               *data.TransactionRepo
 	reportTeeAttestationEventRepo *data.ReportTeeAttestationEventRepo
-	cAbi                          abi.ABI
-	ethClient                     *ethclient.Client
-	contractObj                   *contract.Contract
+	cAbis                         []abi.ABI
+	ethClients                    []*ethclient.Client
+	contractObjs                  []*contract.Contract
 
-	stopChan             chan struct{}
-	blockNumberChan      chan int64
-	latestBlockNumber    int64
-	processedBlockNumber int64
-	processingFlag       bool
+	stopChans             []chan struct{}
+	blockNumberChans      []chan int64
+	latestBlockNumbers    []int64
+	processedBlockNumbers []int64
+	processingFlags       []bool
 
-	lock sync.RWMutex
+	locks []sync.RWMutex
 }
 
-func NewChain(ctx context.Context, bootstrap *conf.Bootstrap, data *data.Data, logger *log.Helper, verifierRepo *data.VerifierRepo, transactionRepo *data.TransactionRepo, reportTeeAttestationRepo *data.ReportTeeAttestationEventRepo) (*Chain, error) {
-	abiFile, err := os.ReadFile(bootstrap.Contract.Abi)
-	if err != nil {
-		return nil, err
-	}
-	cAbi, err := abi.JSON(strings.NewReader(string(abiFile)))
-	if err != nil {
-		return nil, errors.Wrap(err, "abi json error")
-	}
+func NewChain(ctx context.Context, bootstrap *conf.Bootstrap, data *data.Data, logger *log.Helper, verifierRepo *data.VerifierRepo, transactionRepo *data.TransactionRepo, reportTeeAttestationRepo *data.ReportTeeAttestationEventRepo) (*Chains, error) {
+	abiArr := make([]abi.ABI, 0)
+	ethclientArr := make([]*ethclient.Client, 0)
+	contractObjs := make([]*contract.Contract, 0)
+	stopChanArr := make([]chan struct{}, 0)
+	blockNumberChanArr := make([]chan int64, 0)
+	processedBlockNumbers := make([]int64, len(bootstrap.Chains))
+	processingFlags := make([]bool, len(bootstrap.Chains))
+	locks := make([]sync.RWMutex, len(bootstrap.Chains))
+	lastBlockNumbers := make([]int64, len(bootstrap.Chains))
+	for i := 0; i < len(bootstrap.Chains); i++ {
 
-	ethClient, err := ethclient.DialContext(ctx, bootstrap.Chain.RpcUrl)
-	if err != nil {
-		return nil, errors.Wrapf(err, "new eth client error, rpc url: %s", bootstrap.Chain.RpcUrl)
-	}
+		abiFile, err := os.ReadFile(bootstrap.Contracts[i].Abi)
+		if err != nil {
+			return nil, err
+		}
+		cAbi, err := abi.JSON(strings.NewReader(string(abiFile)))
+		if err != nil {
+			return nil, errors.Wrap(err, "abi json error")
+		}
+		abiArr = append(abiArr, cAbi)
+		ethClient, err := ethclient.DialContext(ctx, bootstrap.Chains[i].RpcUrl)
+		if err != nil {
+			return nil, errors.Wrapf(err, "new eth client error, rpc url: %s", bootstrap.Chains[i].RpcUrl)
+		}
+		ethclientArr = append(ethclientArr, ethClient)
 
-	contractObj, err := contract.NewContract(common.HexToAddress(bootstrap.Contract.Addr), ethClient)
-	if err != nil {
-		return nil, errors.Wrapf(err, "NewContract error")
-	}
+		contractObj, err := contract.NewContract(common.HexToAddress(bootstrap.Contracts[i].Addr), ethClient)
+		if err != nil {
+			return nil, errors.Wrapf(err, "NewContract error")
+		}
+		contractObjs = append(contractObjs, contractObj)
 
-	chain := &Chain{
+		stopChanArr = append(stopChanArr, make(chan struct{}))
+		blockNumberChanArr = append(blockNumberChanArr, make(chan int64, defaultBlockNumberChanLength))
+
+	}
+	chains := &Chains{
 		cf:                            bootstrap,
 		data:                          data,
 		logger:                        logger,
 		verifierRepo:                  verifierRepo,
 		transactionRepo:               transactionRepo,
 		reportTeeAttestationEventRepo: reportTeeAttestationRepo,
-		cAbi:                          cAbi,
-		ethClient:                     ethClient,
-		contractObj:                   contractObj,
-
-		stopChan:        make(chan struct{}),
-		blockNumberChan: make(chan int64, defaultBlockNumberChanLength),
+		cAbis:                         abiArr,
+		ethClients:                    ethclientArr,
+		contractObjs:                  contractObjs,
+		latestBlockNumbers:            lastBlockNumbers,
+		stopChans:                     stopChanArr,
+		blockNumberChans:              blockNumberChanArr,
+		processedBlockNumbers:         processedBlockNumbers,
+		processingFlags:               processingFlags,
+		locks:                         locks,
 	}
-
-	return chain, nil
+	return chains, nil
 }
 
-func (c *Chain) Start(ctx context.Context) error {
-	startBlockNumber := c.cf.Chain.StartBlock
+func (c *Chains) Start(ctx context.Context, chainId int) error {
+	startBlockNumber := c.cf.Chains[chainId].StartBlock
 	if startBlockNumber == 0 {
-		blockNumber, err := c.ethClient.BlockNumber(ctx)
+		blockNumber, err := c.ethClients[chainId].BlockNumber(ctx)
 		if err != nil {
-			return errors.Wrapf(err, "chain [%s] get BlockNumber error", c.cf.Chain.ChainName)
+			return errors.Wrapf(err, "chain [%s] get BlockNumber error", c.cf.Chains[chainId].ChainName)
 		}
 		startBlockNumber = int64(blockNumber)
 
-		c.lock.Lock()
-		c.latestBlockNumber = int64(blockNumber)
-		c.lock.Unlock()
+		c.locks[chainId].Lock()
+		c.latestBlockNumbers[chainId] = int64(blockNumber)
+		c.locks[chainId].Unlock()
 	}
 
-	c.logger.WithContext(ctx).Infof("chain [%s] startBlockNumber: %d", c.cf.Chain.ChainName, startBlockNumber)
+	c.logger.WithContext(ctx).Infof("chain [%s] startBlockNumber: %d", c.cf.Chains[chainId].ChainName, startBlockNumber)
 
-	c.lock.Lock()
-	c.processedBlockNumber = startBlockNumber - 1
-	c.blockNumberChan <- startBlockNumber
-	c.lock.Unlock()
+	c.locks[chainId].Lock()
+	c.processedBlockNumbers[chainId] = startBlockNumber - 1
+	c.blockNumberChans[chainId] <- startBlockNumber
+	c.locks[chainId].Unlock()
 
-	go c.run(ctx)
-	go c.stick(ctx)
+	go c.run(ctx, chainId)
+	go c.stick(ctx, chainId)
 
 	return nil
 }
 
-func (c *Chain) Stop(ctx context.Context) error {
-	c.logger.WithContext(ctx).Infof("chain [%s] stopping", c.cf.Chain.ChainName)
+func (c *Chains) Stop(ctx context.Context, chainId int) error {
+	c.logger.WithContext(ctx).Infof("chain [%s] stopping", c.cf.Chains[chainId].ChainName)
 
-	close(c.stopChan)
+	close(c.stopChans[chainId])
 
 	// todo stop
 
-	c.logger.WithContext(ctx).Infof("chain [%s] stopped", c.cf.Chain.ChainName)
+	c.logger.WithContext(ctx).Infof("chain [%s] stopped", c.cf.Chains[chainId].ChainName)
 
 	return nil
 }
 
-func (c *Chain) run(ctx context.Context) {
+func (c *Chains) run(ctx context.Context, chainId int) {
 	for {
 		select {
-		case <-c.stopChan:
-			c.logger.WithContext(ctx).Infof("chain run [%s] stopping", c.cf.Chain.ChainName)
+		case <-c.stopChans[chainId]:
+			c.logger.WithContext(ctx).Infof("chain run [%s] stopping", c.cf.Chains[chainId].ChainName)
 			return
-		case blockNumber := <-c.blockNumberChan:
-			c.Process(ctx, blockNumber)
+		case blockNumber := <-c.blockNumberChans[chainId]:
+			c.Process(ctx, blockNumber, chainId)
 		}
 	}
 }
 
-func (c *Chain) stick(ctx context.Context) {
+func (c *Chains) stick(ctx context.Context, chainId int) {
 	latestBlockNumberTicker := time.NewTicker(1 * time.Second)
 	sendBlockNumberChanTicker := time.NewTicker(1 * time.Second)
 	recordStatusTicker := time.NewTicker(1 * time.Second)
 
 	for {
 		select {
-		case <-c.stopChan:
-			c.logger.WithContext(ctx).Infof("chain stick [%s] stopping", c.cf.Chain.ChainName)
+		case <-c.stopChans[chainId]:
+			c.logger.WithContext(ctx).Infof("chain stick [%s] stopping", c.cf.Chains[chainId].ChainName)
 			return
 		case <-latestBlockNumberTicker.C:
-			go c.UpdateLatestBlockNumber(ctx)
+			go c.UpdateLatestBlockNumber(ctx, chainId)
 		case <-sendBlockNumberChanTicker.C:
-			go c.SendBlockNumberChanByTicker(ctx)
+			go c.SendBlockNumberChanByTicker(ctx, chainId)
 		case <-recordStatusTicker.C:
-			go c.RecordStatus(ctx)
+			go c.RecordStatus(ctx, chainId)
 		}
 	}
 }
 
-func (c *Chain) RecordStatus(ctx context.Context) {
+func (c *Chains) RecordStatus(ctx context.Context, chainId int) {
 	c.logger.WithContext(ctx).Infof("chain [%s] status, latestBlockNumber: %d, processedBlockNumber: %d, processingFlag: %v, blockNumberChanLength: %d",
-		c.cf.Chain.ChainName, c.GetLatestBlockNumber(), c.GetProcessedBlockNumber(), c.GetProcessingFlag(), c.GetBlockNumberChanLength())
+		c.cf.Chains[chainId].ChainName, c.GetLatestBlockNumber(chainId), c.GetProcessedBlockNumber(chainId), c.GetProcessingFlag(chainId), c.GetBlockNumberChanLength(chainId))
 }
 
-func (c *Chain) UpdateLatestBlockNumber(ctx context.Context) {
-	blockNumber, err := c.ethClient.BlockNumber(ctx)
+func (c *Chains) UpdateLatestBlockNumber(ctx context.Context, chainId int) {
+	blockNumber, err := c.ethClients[chainId].BlockNumber(ctx)
 	if err != nil {
-		c.logger.WithContext(ctx).Errorf("chain [%s] get BlockNumber error: %s", c.cf.Chain.ChainName, err)
+		c.logger.WithContext(ctx).Errorf("chain [%s] get BlockNumber error: %s", c.cf.Chains[chainId].ChainName, err)
 	}
 
-	c.lock.Lock()
-	c.latestBlockNumber = int64(blockNumber)
-	c.lock.Unlock()
+	c.locks[chainId].Lock()
+	c.latestBlockNumbers[chainId] = int64(blockNumber)
+	c.locks[chainId].Unlock()
 }
 
-func (c *Chain) GetLatestBlockNumber() int64 {
-	c.lock.RLock()
-	blockNumber := c.latestBlockNumber
-	c.lock.RUnlock()
+func (c *Chains) GetLatestBlockNumber(chainId int) int64 {
+	c.locks[chainId].RLock()
+	blockNumber := c.latestBlockNumbers[chainId]
+	c.locks[chainId].RUnlock()
 
 	return blockNumber
 }
 
-func (c *Chain) SetProcessingFlag(b bool) {
-	c.lock.Lock()
-	c.processingFlag = b
-	c.lock.Unlock()
+func (c *Chains) SetProcessingFlag(b bool, chainId int) {
+	c.locks[chainId].Lock()
+	c.processingFlags[chainId] = b
+	c.locks[chainId].Unlock()
 }
 
-func (c *Chain) GetProcessingFlag() bool {
-	c.lock.RLock()
-	b := c.processingFlag
-	c.lock.RUnlock()
+func (c *Chains) GetProcessingFlag(chainId int) bool {
+	c.locks[chainId].RLock()
+	b := c.processingFlags[chainId]
+	c.locks[chainId].RUnlock()
 
 	return b
 }
 
-func (c *Chain) SetProcessedBlockNumber(processedBlockNumber int64) {
-	c.lock.Lock()
-	c.processedBlockNumber = processedBlockNumber
-	c.lock.Unlock()
+func (c *Chains) SetProcessedBlockNumber(processedBlockNumber int64, chainId int) {
+	c.locks[chainId].Lock()
+	c.processedBlockNumbers[chainId] = processedBlockNumber
+	c.locks[chainId].Unlock()
 }
 
-func (c *Chain) GetProcessedBlockNumber() int64 {
-	c.lock.RLock()
-	processedBlockNumber := c.processedBlockNumber
-	c.lock.RUnlock()
+func (c *Chains) GetProcessedBlockNumber(chainId int) int64 {
+	c.locks[chainId].RLock()
+	processedBlockNumber := c.processedBlockNumbers[chainId]
+	c.locks[chainId].RUnlock()
 
 	return processedBlockNumber
 }
 
-func (c *Chain) GetBlockNumberChanLength() int {
-	c.lock.RLock()
-	blockNumberChanLength := len(c.blockNumberChan)
-	c.lock.RUnlock()
+func (c *Chains) GetBlockNumberChanLength(chainId int) int {
+	c.locks[chainId].RLock()
+	blockNumberChanLength := len(c.blockNumberChans[chainId])
+	c.locks[chainId].RUnlock()
 
 	return blockNumberChanLength
 }
 
-func (c *Chain) IsBlockNumberChanFull() bool {
-	c.lock.RLock()
-	blockNumberChanLength := len(c.blockNumberChan)
-	c.lock.RUnlock()
+func (c *Chains) IsBlockNumberChanFull(chainId int) bool {
+	c.locks[chainId].RLock()
+	blockNumberChanLength := len(c.blockNumberChans[chainId])
+	c.locks[chainId].RUnlock()
 
 	return blockNumberChanLength >= defaultBlockNumberChanLength
 }
 
-func (c *Chain) SendBlockNumberChanByTicker(ctx context.Context) {
-	if c.GetProcessingFlag() {
+func (c *Chains) SendBlockNumberChanByTicker(ctx context.Context, chainId int) {
+	if c.GetProcessingFlag(chainId) {
 		return
 	}
-	if c.IsBlockNumberChanFull() {
+	if c.IsBlockNumberChanFull(chainId) {
 		return
 	}
 
-	latestBlockNumber := c.GetLatestBlockNumber()
-	processedBlockNumber := c.GetProcessedBlockNumber()
+	latestBlockNumber := c.GetLatestBlockNumber(chainId)
+	processedBlockNumber := c.GetProcessedBlockNumber(chainId)
 
 	if latestBlockNumber > processedBlockNumber {
-		c.lock.Lock()
-		c.blockNumberChan <- processedBlockNumber + 1
-		c.lock.Unlock()
+		c.locks[chainId].Lock()
+		c.blockNumberChans[chainId] <- processedBlockNumber + 1
+		c.locks[chainId].Unlock()
 	}
 }
 
-func (c *Chain) getEndBlockNumber(startBlockNumber int64) int64 {
+func (c *Chains) getEndBlockNumber(startBlockNumber int64, chainId int) int64 {
 	endBlockNumber := startBlockNumber
 
-	latestBlockNumber := c.GetLatestBlockNumber()
+	latestBlockNumber := c.GetLatestBlockNumber(chainId)
 	if startBlockNumber >= latestBlockNumber {
 		return endBlockNumber
 	}
 
-	if latestBlockNumber-startBlockNumber > c.cf.Chain.OffsetBlock {
-		endBlockNumber = startBlockNumber + c.cf.Chain.OffsetBlock
+	if latestBlockNumber-startBlockNumber > c.cf.Chains[chainId].OffsetBlock {
+		endBlockNumber = startBlockNumber + c.cf.Chains[chainId].OffsetBlock
 	} else {
 		endBlockNumber = latestBlockNumber - 1
 	}
@@ -260,7 +279,7 @@ func (c *Chain) getEndBlockNumber(startBlockNumber int64) int64 {
 	return endBlockNumber
 }
 
-func (c *Chain) SendAttestationTrx(ctx context.Context, attestationIds [][32]byte, results []bool) (string, error) {
+func (c *Chains) SendAttestationTrx(ctx context.Context, attestationIds [][32]byte, results []bool, chainId int) (string, error) {
 
 	privateKeyBytes, err := Sm4Decrypt(c)
 	txHash := ""
@@ -278,16 +297,16 @@ func (c *Chain) SendAttestationTrx(ctx context.Context, attestationIds [][32]byt
 	}
 	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
 
-	nonce, err := c.ethClient.PendingNonceAt(ctx, fromAddress)
+	nonce, err := c.ethClients[chainId].PendingNonceAt(ctx, fromAddress)
 	if err != nil {
 		return txHash, errors.Wrap(err, "eth client get Nonce error")
 	}
-	gasPrice, err := c.ethClient.SuggestGasPrice(ctx)
+	gasPrice, err := c.ethClients[chainId].SuggestGasPrice(ctx)
 	if err != nil {
 		return txHash, errors.Wrap(err, "eth client get SuggestGasPrice error")
 	}
 
-	chainID, err := c.ethClient.ChainID(ctx)
+	chainID, err := c.ethClients[chainId].ChainID(ctx)
 	if err != nil {
 		return txHash, errors.Wrap(err, "eth client get ChainID error")
 	}
@@ -301,7 +320,7 @@ func (c *Chain) SendAttestationTrx(ctx context.Context, attestationIds [][32]byt
 	//auth.GasLimit = uint64(300000) // in units
 	auth.GasPrice = gasPrice
 
-	tx, err := c.contractObj.VerifyAttestationBatch(auth, attestationIds, results)
+	tx, err := c.contractObjs[chainId].VerifyAttestationBatch(auth, attestationIds, results)
 	if err != nil {
 		return txHash, errors.Wrap(err, "contract VerifyAttestationBatch error")
 	}
@@ -312,21 +331,21 @@ func (c *Chain) SendAttestationTrx(ctx context.Context, attestationIds [][32]byt
 	return txHash, nil
 }
 
-func (c *Chain) process(ctx context.Context, startBlockNumber, endBlockNumber int64) error {
+func (c *Chains) process(ctx context.Context, startBlockNumber, endBlockNumber int64, chainId int) error {
 	q := ethereum.FilterQuery{
 		FromBlock: big.NewInt(startBlockNumber),
 		ToBlock:   big.NewInt(endBlockNumber),
 		Addresses: []common.Address{
-			common.HexToAddress(c.cf.Contract.Addr),
+			common.HexToAddress(c.cf.Contracts[chainId].Addr),
 		},
 		Topics: [][]common.Hash{
 			{
-				common.HexToHash(c.cf.Contract.Topic),
+				common.HexToHash(c.cf.Contracts[chainId].Topic),
 			},
 		},
 	}
 
-	cLogs, err := c.ethClient.FilterLogs(ctx, q)
+	cLogs, err := c.ethClients[chainId].FilterLogs(ctx, q)
 	if err != nil {
 		return errors.Wrap(err, "client FilterLogs error")
 	}
@@ -336,7 +355,7 @@ func (c *Chain) process(ctx context.Context, startBlockNumber, endBlockNumber in
 	var result []bool
 
 	for _, cLog := range cLogs {
-		unpackedData, err := c.contractObj.ParseReportTeeAttestation(cLog)
+		unpackedData, err := c.contractObjs[chainId].ParseReportTeeAttestation(cLog)
 		if err != nil {
 			return errors.Wrap(err, "contract ParseReportTeeAttestation error")
 		}
@@ -355,7 +374,7 @@ func (c *Chain) process(ctx context.Context, startBlockNumber, endBlockNumber in
 
 		attestationIds = append(attestationIds, unpackedData.AttestationId)
 		// Verify attestation
-		isTrue, err := verifyAttestation(c, unpackedData.Attestation)
+		isTrue, err := verifyAttestation(c, unpackedData.Attestation, chainId)
 		if !isTrue {
 			result = append(result, false)
 			continue
@@ -370,7 +389,7 @@ func (c *Chain) process(ctx context.Context, startBlockNumber, endBlockNumber in
 	if len(attestationIds) == 0 {
 		return nil
 	}
-	_, err = c.SendAttestationTrx(ctx, attestationIds, result)
+	_, err = c.SendAttestationTrx(ctx, attestationIds, result, chainId)
 
 	if err != nil {
 		return err
@@ -379,36 +398,36 @@ func (c *Chain) process(ctx context.Context, startBlockNumber, endBlockNumber in
 	return nil
 }
 
-func (c *Chain) Process(ctx context.Context, startBlockNumber int64) {
-	processedBlockNumber := c.GetProcessedBlockNumber()
+func (c *Chains) Process(ctx context.Context, startBlockNumber int64, chainId int) {
+	processedBlockNumber := c.GetProcessedBlockNumber(chainId)
 	if processedBlockNumber != startBlockNumber-1 {
-		c.logger.WithContext(ctx).Warnf("chain [%s] Process, startBlockNumber: %d, processedBlockNumber: %d", c.cf.Chain.ChainName, startBlockNumber, processedBlockNumber)
+		c.logger.WithContext(ctx).Warnf("chain [%s] Process, startBlockNumber: %d, processedBlockNumber: %d", c.cf.Chains[chainId].ChainName, startBlockNumber, processedBlockNumber)
 		return
 	}
 
-	c.SetProcessingFlag(true)
-	defer c.SetProcessingFlag(false)
+	c.SetProcessingFlag(true, chainId)
+	defer c.SetProcessingFlag(false, chainId)
 
-	endBlockNumber := c.getEndBlockNumber(startBlockNumber)
+	endBlockNumber := c.getEndBlockNumber(startBlockNumber, chainId)
 
-	c.logger.WithContext(ctx).Infof("chain [%s] Process, latestBlockNumber: %d, startBlockNumber: %d, endBlockNumber: %d", c.cf.Chain.ChainName, c.GetLatestBlockNumber(), startBlockNumber, endBlockNumber)
+	c.logger.WithContext(ctx).Infof("chain [%s] Process, latestBlockNumber: %d, startBlockNumber: %d, endBlockNumber: %d", c.cf.Chains[chainId].ChainName, c.GetLatestBlockNumber(chainId), startBlockNumber, endBlockNumber)
 
-	err := c.process(ctx, startBlockNumber, endBlockNumber)
+	err := c.process(ctx, startBlockNumber, endBlockNumber, chainId)
 	if err != nil {
-		c.logger.WithContext(ctx).Errorf("chain [%s] Process, process error: %s", c.cf.Chain.ChainName, err)
+		c.logger.WithContext(ctx).Errorf("chain [%s] Process, process error: %s", c.cf.Chains[chainId].ChainName, err)
 		return
 	}
 
-	c.SetProcessedBlockNumber(endBlockNumber)
+	c.SetProcessedBlockNumber(endBlockNumber, chainId)
 
-	if c.IsBlockNumberChanFull() {
+	if c.IsBlockNumberChanFull(chainId) {
 		return
 	}
 
-	latestBlockNumber := c.GetLatestBlockNumber()
-	c.lock.Lock()
+	latestBlockNumber := c.GetLatestBlockNumber(chainId)
+	c.locks[chainId].Lock()
 	if latestBlockNumber > endBlockNumber {
-		c.blockNumberChan <- endBlockNumber + 1
+		c.blockNumberChans[chainId] <- endBlockNumber + 1
 	}
-	c.lock.Unlock()
+	c.locks[chainId].Unlock()
 }
