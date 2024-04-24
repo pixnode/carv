@@ -1,6 +1,6 @@
 # TODO
 
-## Virifier Transaction Config
+## Verifier Transaction Config
 
 ### 1. Table Structure
 
